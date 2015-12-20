@@ -1,71 +1,151 @@
 #!/usr/bin/env python
-import sys
 import logging
+import argparse
+from itertools import cycle
+from random import random
+from time import sleep
 from mpi4py import MPI
 from matrix import Matrix
 
+DEBUG = True
 
-logging.basicConfig(level=logging.DEBUG,					# сообщение отладочное
-                    format='[%(levelname)s]: %(message)s')  # формат выводимого сообщения
-														   
+# настраиваем логирование и формат отладочной инфорамции
+if DEBUG:
+    logging.basicConfig(level=logging.DEBUG,
+                        format='[%(levelname)s]: %(message)s')
+
+
 class MulMatrixApp(object):
 
-    def start_childs(self):
-        self.num_childs = self.matrix1.n_rows * self.matrix2.n_columns
-        return MPI.COMM_SELF.Spawn(sys.executable, args=['slave.py'], # создание коммуникатора
-                                   maxprocs=self.num_childs)
+    def __init__(self, debug=False):
+        self.debug = debug
 
-    def send_data(self, comm):
-        i = 0
-        reqs = []
-        for row1 in self.matrix1:
-            for column2 in self.matrix2.transponed():
-                req = comm.isend([row1, column2], dest=i) # передача сообщения без блокирови, dest-id процесса
-                reqs.append(req) # сохранение состояний ответов
-                i += 1
+    def multiply_matrixes(self, matrix1, matrix2):
+        """
+        основная функция главного процесса, которая занимается перемножением
+        матриц. Распределяет задачи для процессов, ожидает от них результатов.
+        Суть - поочерёдно раздаем задачи для всех процессов.
+        Как только встретился процесс, который уже выполняет задачу, ожидаем
+        её завершения и выдаем ему новую задачу.
+        После перемножения всех строк и столбцов, отправляем все процессам
+        пустую задачу чтобы они завершили своё выполнение.
+        Таким образом, задачу перемножения матриц может решить от 2-х до
+        неограниченного числа процессов. Часть из них просто не будут ничего
+        делать
+        """
+        reqs = [None] * self.size  # MPI.Request для работы с процессами
+        results = []  # куда будут записаны результаты работы процессов
 
-        for i in reqs:
-            i.wait()	# ждем получения ответов от всех процессов
+        # бесконечный итератор по идентификаторам slave-процессов
+        slaves_id_iterator = cycle(range(1, self.size))
+        for row1 in matrix1:
+            for column2 in matrix2.transponed():
+                slave_id = next(slaves_id_iterator)
 
-    def receive_data(self, comm):
-        reqs = []
-        N = self.matrix1.n_rows * self.matrix2.n_columns
-        for i in range(N):
-            reqs.append(comm.irecv(source=i))
+                # если очередной slave уже выполняет какую-то задачу -
+                # дождёмся завершения
+                if reqs[slave_id] is not None:
+                    res = reqs[slave_id].wait()
+                    logging.debug("{} returned {}".format(slave_id, res))
+                    results.append(res)
 
-        results = [None] * N
-        all_done = False
-        while not all_done:			#cпрашиваем у каждого процесса, готов ли он, если да то выводим его результат,
-            all_done = True			#если нет переходим к другому процессу, и так далее пока все процессы не будут готовы
-            for i in range(N):
-                if results[i] is not None:
-                    continue
-                finished, res = reqs[i].test()
-                if finished:
-                    results[i] = res
-                    logging.debug("{} proccess returned {}".format(i, res))
-                else:
-                    all_done = False
+                # выдадим очередную задачу очередному slave
+                self.comm.send([row1, column2], dest=slave_id)
+                reqs[slave_id] = self.comm.irecv(source=slave_id)
 
-        return Matrix.from_list(results, n_rows=self.matrix1.n_rows)
+        # соберём результаты работы со всех оставшихся slave
+        slave_id = next(slaves_id_iterator)
+        start_id = slave_id
+        while True:
+            # получаем очередной результат
+            if reqs[slave_id]:
+                res = reqs[slave_id].wait()
+                logging.debug("{} returned {}".format(slave_id, res))
+                results.append(res)
 
-    def run(self):
-        self.matrix1 = Matrix.from_file('matrix1.txt')
-        self.matrix2 = Matrix.from_file('matrix2.txt')
+            # запишем None как отметку о том, что мы получили от этого slave
+            reqs[slave_id] = None
+
+            slave_id = next(slaves_id_iterator)
+            if slave_id == start_id:
+                break
+
+        # отправим всем slave пустую задачу, чтобы они завершили работу
+        for slave_id in range(1, self.size):
+            self.comm.send([None, None], dest=slave_id)
+
+        return Matrix.from_list(results, n_rows=matrix1.n_rows)
+
+    def run_master(self):
+        args = self.get_args()
+
+        if self.size < 2:
+            raise RuntimeError(
+                "Должно быть запущено по крайней мере 2 процесса")
+        if args.m1 != args.n2:
+            raise RuntimeError(
+                "Невозможно перемножить матрицы заданного размера")
+
+        matrix1 = Matrix.random_by_size(args.n1, args.m1)
+        matrix2 = Matrix.random_by_size(args.n2, args.m2)
         print("Matrix 1:")
-        print(self.matrix1)
+        print(matrix1)
         print("")
         print("Matrix 2:")
-        print(self.matrix1)
+        print(matrix2)
         print("")
 
-        comm = self.start_childs()
-        self.send_data(comm)
-        result_matrix = self.receive_data(comm)
+        result_matrix = self.multiply_matrixes(matrix1, matrix2)
+
         print("Result matrix:")
         print(result_matrix)
 
+    def run_slave(self):
+        while True:
+            # получаем данные с прмощью блокирующегоо вызова
+            row, column = self.comm.recv(source=0)
+            logging.debug("{} received {}".format(self.rank, (row, column)))
+            # если пришла пустая задача - выход
+            if row is None or column is None:
+                break
+
+            # самая суть - перемножение строки на столбец
+            res = sum([a * b for a, b in zip(row, column)])
+
+            if self.debug:
+                sleep(2)
+            self.comm.send(res, dest=0)
+        logging.debug("{} exited".format(self.rank))
+
+    def get_args(self):
+        """ Функция для парсинга аргументов командной строки """
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            'n1', type=int, help="number of first matrix rows")
+        parser.add_argument(
+            'm1', type=int, help="number of first matrix columns")
+        parser.add_argument(
+            'n2', type=int, help="number of second matrix rows")
+        parser.add_argument(
+            'm2', type=int, help="number of second matrix columns")
+        return parser.parse_args()
+
+    def run(self):
+        self.comm = MPI.COMM_WORLD           # получаем текущий коммуникатор
+        self.size = self.comm.Get_size()     # узнаем количество процессов
+        self.rank = self.comm.Get_rank()     # узнаем id процесса
+        if self.rank == 0:
+            try:
+                return self.run_master()
+            except (Exception, SystemExit) as e:
+                # отправим всем slave пустую задачу, чтобы они завершили работу
+                for slave_id in range(1, self.size):
+                    self.comm.send([None, None], dest=slave_id)
+                raise e
+        else:
+            return self.run_slave()
+
 
 if __name__ == "__main__":
-    app = MulMatrixApp()
+    app = MulMatrixApp(DEBUG)
     app.run()

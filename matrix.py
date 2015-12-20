@@ -1,4 +1,5 @@
 import collections
+from random import randint
 
 
 class Matrix(list):
@@ -7,7 +8,7 @@ class Matrix(list):
         if iterable:
             if not isinstance(iterable, collections.Iterable):
                 raise ValueError("{} is not iterable".format(iterable))
-            
+
             for row in iterable:
                 if not isinstance(row, collections.Iterable):
                     raise ValueError("{} is not iterable".format(row))
@@ -19,9 +20,13 @@ class Matrix(list):
                         raise ValueError(
                             "Different number of columns in matrix's rows")
 
-        return super().__init__(iterable) # super() - получение объекта родительского класса
+        return super().__init__(iterable)
 
-    def __setitem__(self, key, value): # присваивание элемента с данным ключом или индексом; key - индекс элемента, value - строка
+    def __setitem__(self, key, value):
+        """
+        присваивание элемента с данным ключом или индексом;
+        key - индекс элемента, value - строка матрицы
+        """
         if isinstance(key, int):
             if not isinstance(value, collections.Iterable):
                 raise ValueError("{} is not iterable".format(value))
@@ -45,11 +50,31 @@ class Matrix(list):
             matrix.append(iterable[i: i + n_cols])
         return cls(matrix)
 
-    def __repr__(self): #  получения строкового представления объекта.генерирование форм, которые могут быть прочитаны интерпретатором
-        spr = super().__repr__()        
+    @classmethod
+    def random_by_size(cls, n, m):
+        """
+        Сгенерировать матрицу MxN со случайными значениями
+        """
+        if not (m > 0 and n > 0):
+            raise ValueError("Matrix size must be greter 0")
+        matrix = []
+        for i in range(n):
+            matrix.append([randint(0, 9) for i in range(m)])
+        return cls(matrix)
+
+    def __repr__(self):
+        """
+        получение строкового представления объекта.
+        генерирование форм, которые могут быть прочитаны интерпретатором
+        """
+        spr = super().__repr__()
         return "Matrix({})".format(spr)
 
-    def __str__(self): # получения строкового представления объекта. возврат значений в читабельной форме
+    def __str__(self):
+        """
+        Получение строкового представления объекта.
+        возврат значений в читабельной форме
+        """
         return "\n".join(" ".join(map(str,row)) for row in self)
 
     @property
