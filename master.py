@@ -2,7 +2,6 @@
 import logging
 import argparse
 from itertools import cycle
-from random import random
 from time import sleep
 from mpi4py import MPI
 from matrix import Matrix
