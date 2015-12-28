@@ -2,12 +2,11 @@
 import logging
 import argparse
 from itertools import cycle
-from random import random
 from time import sleep
 from mpi4py import MPI
 from matrix import Matrix
 
-DEBUG = True
+DEBUG = False
 
 # настраиваем логирование и формат отладочной инфорамции
 if DEBUG:
@@ -19,6 +18,12 @@ class MulMatrixApp(object):
 
     def __init__(self, debug=False):
         self.debug = debug
+        self.comm = MPI.COMM_WORLD           # получаем текущий коммуникатор
+        self.size = self.comm.Get_size()     # узнаем количество процессов
+        self.rank = self.comm.Get_rank()     # узнаем id процесса
+        if self.size < 2:
+            raise RuntimeError(
+                "Должно быть запущено по крайней мере 2 процесса")
 
     def multiply_matrixes(self, matrix1, matrix2):
         """
@@ -70,18 +75,11 @@ class MulMatrixApp(object):
             if slave_id == start_id:
                 break
 
-        # отправим всем slave пустую задачу, чтобы они завершили работу
-        for slave_id in range(1, self.size):
-            self.comm.send([None, None], dest=slave_id)
-
         return Matrix.from_list(results, n_rows=matrix1.n_rows)
 
     def run_master(self):
         args = self.get_args()
 
-        if self.size < 2:
-            raise RuntimeError(
-                "Должно быть запущено по крайней мере 2 процесса")
         if args.m1 != args.n2:
             raise RuntimeError(
                 "Невозможно перемножить матрицы заданного размера")
@@ -117,6 +115,11 @@ class MulMatrixApp(object):
             self.comm.send(res, dest=0)
         logging.debug("{} exited".format(self.rank))
 
+    def stop_slaves(self):
+        # отправим всем slave пустую задачу, чтобы они завершили работу
+        for slave_id in range(1, self.size):
+            self.comm.send([None, None], dest=slave_id)
+
     def get_args(self):
         """ Функция для парсинга аргументов командной строки """
         parser = argparse.ArgumentParser()
@@ -131,17 +134,11 @@ class MulMatrixApp(object):
         return parser.parse_args()
 
     def run(self):
-        self.comm = MPI.COMM_WORLD           # получаем текущий коммуникатор
-        self.size = self.comm.Get_size()     # узнаем количество процессов
-        self.rank = self.comm.Get_rank()     # узнаем id процесса
         if self.rank == 0:
             try:
                 return self.run_master()
-            except (Exception, SystemExit) as e:
-                # отправим всем slave пустую задачу, чтобы они завершили работу
-                for slave_id in range(1, self.size):
-                    self.comm.send([None, None], dest=slave_id)
-                raise e
+            finally:
+                self.stop_slaves()
         else:
             return self.run_slave()
 
